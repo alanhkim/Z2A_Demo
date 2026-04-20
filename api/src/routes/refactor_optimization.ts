@@ -106,6 +106,17 @@ let employees: Employee[] = [];
 let departments: Department[] = [];
 let timesheets: Timesheet[] = [];
 
+/** Replaces the in-memory data stores — intended for use in tests only. */
+export function resetData(
+  testEmployees: Employee[] = [],
+  testDepartments: Department[] = [],
+  testTimesheets: Timesheet[] = []
+): void {
+  employees = testEmployees.map((e) => ({ ...e }));
+  departments = testDepartments.map((d) => ({ ...d }));
+  timesheets = testTimesheets.map((t) => ({ ...t }));
+}
+
 // ----------------------------------------------------------------------------
 // Helpers — payroll calculation
 // ----------------------------------------------------------------------------
