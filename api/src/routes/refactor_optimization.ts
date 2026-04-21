@@ -1,285 +1,328 @@
 // ============================================================================
 // refactor_optimization.ts
-// This file contains working but poorly written code for demo purposes.
+// Refactored for clarity, maintainability, and type safety.
 // ============================================================================
 import { Request, Response } from "express";
 
-var employees: any[] = [];
-var departments: any[] = [];
-var timesheets: any[] = [];
+// ----------------------------------------------------------------------------
+// Interfaces
+// ----------------------------------------------------------------------------
+interface Employee {
+  id: number;
+  firstName: string;
+  lastName: string;
+  active: boolean;
+  level: string;
+  departmentId: number;
+  salary: number;
+  yearsOfService: number;
+  rating: number;
+}
 
-// --------------------------------------------------------------------------
-// SMELL 1: God function — does way too many things in one place
-// Calculates payroll, applies taxes, generates report, and sends response
-// all in a single 80-line function with deeply nested logic.
-// --------------------------------------------------------------------------
-export function generatePayrollReport(req: Request, res: Response) {
-  var month = req.query.month;
-  var year = req.query.year;
-  var report: any[] = [];
-  var totalPayout = 0;
-  var totalTax = 0;
-  var totalOvertime = 0;
-  for (var i = 0; i < employees.length; i++) {
-    if (employees[i].active == true) {
-      var emp = employees[i];
-      var hoursWorked = 0;
-      var overtimeHours = 0;
-      for (var j = 0; j < timesheets.length; j++) {
-        if (timesheets[j].employeeId == emp.id) {
-          if (timesheets[j].month == month && timesheets[j].year == year) {
-            hoursWorked = hoursWorked + timesheets[j].hours;
-            if (timesheets[j].hours > 8) {
-              overtimeHours = overtimeHours + (timesheets[j].hours - 8);
-            }
-          }
-        }
+interface Department {
+  id: number;
+  name: string;
+}
+
+interface Timesheet {
+  employeeId: number;
+  month: string | number;
+  year: string | number;
+  hours: number;
+}
+
+interface PayrollEntry {
+  employeeId: number;
+  name: string;
+  department: string;
+  level: string;
+  hoursWorked: number;
+  overtimeHours: number;
+  basePay: number;
+  overtimePay: number;
+  grossPay: number;
+  tax: number;
+  netPay: number;
+}
+
+interface DepartmentSummary {
+  id: number;
+  name: string;
+  activeEmployeeCount: number;
+  totalSalary: number;
+  averageSalary: number;
+}
+
+let employees: Employee[] = [];
+let departments: Department[] = [];
+let timesheets: Timesheet[] = [];
+
+// ----------------------------------------------------------------------------
+// Constants — SMELL 4 fix: named constants replace magic numbers
+// ----------------------------------------------------------------------------
+
+// Hourly rates by level
+const HOURLY_RATE: Record<string, number> = {
+  junior: 25,
+  mid: 40,
+  senior: 60,
+  lead: 80,
+  director: 100,
+  default: 20,
+};
+
+// Overtime multiplier (time-and-a-half)
+const OVERTIME_MULTIPLIER = 1.5;
+// Daily hours threshold after which overtime begins
+const OVERTIME_DAILY_THRESHOLD = 8;
+
+// Tax brackets: [minimumGross, rate]
+const TAX_BRACKETS: Array<{ threshold: number; rate: number }> = [
+  { threshold: 10000, rate: 0.35 },
+  { threshold: 7000,  rate: 0.30 },
+  { threshold: 4000,  rate: 0.25 },
+  { threshold: 2000,  rate: 0.20 },
+  { threshold: 0,     rate: 0.15 },
+];
+
+// Tenure-based bonus rates as a fraction of salary
+const TENURE_BONUS_RATES: Array<{ minYears: number; rate: number }> = [
+  { minYears: 10, rate: 0.15 },
+  { minYears: 5,  rate: 0.10 },
+  { minYears: 2,  rate: 0.05 },
+  { minYears: 0,  rate: 0.02 },
+];
+
+// Performance rating multipliers
+const RATING_EXCELLENT_THRESHOLD = 4.5;
+const RATING_GOOD_THRESHOLD = 3.5;
+const RATING_POOR_THRESHOLD = 2.0;
+const RATING_EXCELLENT_MULTIPLIER = 1.5;
+const RATING_GOOD_MULTIPLIER = 1.2;
+const RATING_POOR_MULTIPLIER = 0.5;
+
+// Level-based bonus stipends
+const LEVEL_BONUS_STIPEND: Record<string, number> = {
+  director: 5000,
+  lead: 3000,
+  senior: 1500,
+};
+
+// ----------------------------------------------------------------------------
+// Private helpers
+// ----------------------------------------------------------------------------
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function getHourlyRate(level: string): number {
+  return HOURLY_RATE[level] ?? HOURLY_RATE.default;
+}
+
+function getEmployeeHours(
+  employeeId: number,
+  month: string | string[],
+  year: string | string[]
+): { hoursWorked: number; overtimeHours: number } {
+  let hoursWorked = 0;
+  let overtimeHours = 0;
+  for (const sheet of timesheets) {
+    if (sheet.employeeId === employeeId && sheet.month == month && sheet.year == year) {
+      hoursWorked += sheet.hours;
+      if (sheet.hours > OVERTIME_DAILY_THRESHOLD) {
+        overtimeHours += sheet.hours - OVERTIME_DAILY_THRESHOLD;
       }
-      var basePay = 0;
-      if (emp.level == "junior") {
-        basePay = hoursWorked * 25;
-      } else if (emp.level == "mid") {
-        basePay = hoursWorked * 40;
-      } else if (emp.level == "senior") {
-        basePay = hoursWorked * 60;
-      } else if (emp.level == "lead") {
-        basePay = hoursWorked * 80;
-      } else if (emp.level == "director") {
-        basePay = hoursWorked * 100;
-      } else {
-        basePay = hoursWorked * 20;
-      }
-      var overtimePay = overtimeHours * 1.5 * (basePay / hoursWorked || 0);
-      var grossPay = basePay + overtimePay;
-      var tax = 0;
-      if (grossPay > 10000) {
-        tax = grossPay * 0.35;
-      } else if (grossPay > 7000) {
-        tax = grossPay * 0.30;
-      } else if (grossPay > 4000) {
-        tax = grossPay * 0.25;
-      } else if (grossPay > 2000) {
-        tax = grossPay * 0.20;
-      } else {
-        tax = grossPay * 0.15;
-      }
-      var netPay = grossPay - tax;
-      var deptName = "";
-      for (var k = 0; k < departments.length; k++) {
-        if (departments[k].id == emp.departmentId) {
-          deptName = departments[k].name;
-        }
-      }
-      totalPayout = totalPayout + netPay;
-      totalTax = totalTax + tax;
-      totalOvertime = totalOvertime + overtimeHours;
-      report.push({
-        employeeId: emp.id,
-        name: emp.firstName + " " + emp.lastName,
-        department: deptName,
-        level: emp.level,
-        hoursWorked: hoursWorked,
-        overtimeHours: overtimeHours,
-        basePay: Math.round(basePay * 100) / 100,
-        overtimePay: Math.round(overtimePay * 100) / 100,
-        grossPay: Math.round(grossPay * 100) / 100,
-        tax: Math.round(tax * 100) / 100,
-        netPay: Math.round(netPay * 100) / 100,
-      });
     }
   }
+  return { hoursWorked, overtimeHours };
+}
+
+function calculateBasePay(level: string, hoursWorked: number): number {
+  return hoursWorked * getHourlyRate(level);
+}
+
+function calculateTax(grossPay: number): number {
+  const bracket = TAX_BRACKETS.find((b) => grossPay > b.threshold)!;
+  return grossPay * bracket.rate;
+}
+
+function getDepartmentName(departmentId: number): string {
+  return departments.find((d) => d.id === departmentId)?.name ?? "";
+}
+
+function buildPayrollEntry(emp: Employee, month: string | string[], year: string | string[]): PayrollEntry {
+  const { hoursWorked, overtimeHours } = getEmployeeHours(emp.id, month, year);
+  const hourlyRate = getHourlyRate(emp.level);
+  const basePay = calculateBasePay(emp.level, hoursWorked);
+  const overtimePay = overtimeHours * OVERTIME_MULTIPLIER * hourlyRate;
+  const grossPay = basePay + overtimePay;
+  const tax = calculateTax(grossPay);
+  const netPay = grossPay - tax;
+
+  return {
+    employeeId: emp.id,
+    name: `${emp.firstName} ${emp.lastName}`,
+    department: getDepartmentName(emp.departmentId),
+    level: emp.level,
+    hoursWorked,
+    overtimeHours,
+    basePay: round2(basePay),
+    overtimePay: round2(overtimePay),
+    grossPay: round2(grossPay),
+    tax: round2(tax),
+    netPay: round2(netPay),
+  };
+}
+
+function countEmployees(predicate: (emp: Employee) => boolean): number {
+  return employees.filter(predicate).length;
+}
+
+// ----------------------------------------------------------------------------
+// SMELL 1 (fixed): God function split into focused helpers above.
+// generatePayrollReport is now a thin orchestrator.
+// ----------------------------------------------------------------------------
+export function generatePayrollReport(req: Request, res: Response) {
+  const { month, year } = req.query as { month: string; year: string };
+
+  const report = employees
+    .filter((emp) => emp.active)
+    .map((emp) => buildPayrollEntry(emp, month, year));
+
+  const totalPayout = report.reduce((sum, e) => sum + e.netPay, 0);
+  const totalTax = report.reduce((sum, e) => sum + e.tax, 0);
+  const totalOvertimeHours = report.reduce((sum, e) => sum + e.overtimeHours, 0);
+
   res.json({
-    period: month + "/" + year,
+    period: `${month}/${year}`,
     employees: report,
     summary: {
       totalEmployees: report.length,
-      totalPayout: Math.round(totalPayout * 100) / 100,
-      totalTax: Math.round(totalTax * 100) / 100,
-      totalOvertimeHours: totalOvertime,
+      totalPayout: round2(totalPayout),
+      totalTax: round2(totalTax),
+      totalOvertimeHours,
     },
   });
 }
 
-// --------------------------------------------------------------------------
-// SMELL 2: Massive repetition / copy-paste code
-// Each stat function repeats nearly identical filtering and aggregation
-// logic with only minor differences.
-// --------------------------------------------------------------------------
-export function getActiveEmployeeCount(req: Request, res: Response) {
-  var count = 0;
-  for (var i = 0; i < employees.length; i++) {
-    if (employees[i].active == true) {
-      count = count + 1;
-    }
-  }
-  res.json({ activeEmployees: count });
+// ----------------------------------------------------------------------------
+// SMELL 2 (fixed): Shared countEmployees helper eliminates repetition.
+// ----------------------------------------------------------------------------
+export function getActiveEmployeeCount(_req: Request, res: Response) {
+  res.json({ activeEmployees: countEmployees((emp) => emp.active) });
 }
 
-export function getInactiveEmployeeCount(req: Request, res: Response) {
-  var count = 0;
-  for (var i = 0; i < employees.length; i++) {
-    if (employees[i].active == false) {
-      count = count + 1;
-    }
-  }
-  res.json({ inactiveEmployees: count });
+export function getInactiveEmployeeCount(_req: Request, res: Response) {
+  res.json({ inactiveEmployees: countEmployees((emp) => !emp.active) });
 }
 
-export function getJuniorEmployeeCount(req: Request, res: Response) {
-  var count = 0;
-  for (var i = 0; i < employees.length; i++) {
-    if (employees[i].level == "junior" && employees[i].active == true) {
-      count = count + 1;
-    }
-  }
-  res.json({ juniorEmployees: count });
+export function getJuniorEmployeeCount(_req: Request, res: Response) {
+  res.json({ juniorEmployees: countEmployees((emp) => emp.active && emp.level === "junior") });
 }
 
-export function getSeniorEmployeeCount(req: Request, res: Response) {
-  var count = 0;
-  for (var i = 0; i < employees.length; i++) {
-    if (employees[i].level == "senior" && employees[i].active == true) {
-      count = count + 1;
-    }
-  }
-  res.json({ seniorEmployees: count });
+export function getSeniorEmployeeCount(_req: Request, res: Response) {
+  res.json({ seniorEmployees: countEmployees((emp) => emp.active && emp.level === "senior") });
 }
 
-export function getLeadEmployeeCount(req: Request, res: Response) {
-  var count = 0;
-  for (var i = 0; i < employees.length; i++) {
-    if (employees[i].level == "lead" && employees[i].active == true) {
-      count = count + 1;
-    }
-  }
-  res.json({ leadEmployees: count });
+export function getLeadEmployeeCount(_req: Request, res: Response) {
+  res.json({ leadEmployees: countEmployees((emp) => emp.active && emp.level === "lead") });
 }
 
-// --------------------------------------------------------------------------
-// SMELL 3: Deeply nested conditionals / arrow code
-// The transfer logic is buried under 6 levels of nesting, making it
-// nearly impossible to read or maintain.
-// --------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// SMELL 3 (fixed): Early returns replace deeply nested conditionals.
+// ----------------------------------------------------------------------------
 export function transferEmployee(req: Request, res: Response) {
-  var employeeId = req.body.employeeId;
-  var newDeptId = req.body.departmentId;
-  if (employeeId != null && employeeId != undefined) {
-    if (newDeptId != null && newDeptId != undefined) {
-      var employee = null;
-      for (var i = 0; i < employees.length; i++) {
-        if (employees[i].id == employeeId) {
-          employee = employees[i];
-        }
-      }
-      if (employee != null) {
-        if (employee.active == true) {
-          var dept = null;
-          for (var j = 0; j < departments.length; j++) {
-            if (departments[j].id == newDeptId) {
-              dept = departments[j];
-            }
-          }
-          if (dept != null) {
-            if (dept.id != employee.departmentId) {
-              employee.departmentId = dept.id;
-              res.json({ message: "Employee transferred to " + dept.name });
-            } else {
-              res.status(400).json({ error: "Employee already in that department" });
-            }
-          } else {
-            res.status(404).json({ error: "Department not found" });
-          }
-        } else {
-          res.status(400).json({ error: "Cannot transfer inactive employee" });
-        }
-      } else {
-        res.status(404).json({ error: "Employee not found" });
-      }
-    } else {
-      res.status(400).json({ error: "Department ID is required" });
-    }
-  } else {
+  const { employeeId, departmentId: newDeptId } = req.body;
+
+  if (employeeId == null) {
     res.status(400).json({ error: "Employee ID is required" });
+    return;
   }
+  if (newDeptId == null) {
+    res.status(400).json({ error: "Department ID is required" });
+    return;
+  }
+
+  const employee = employees.find((e) => e.id == employeeId);
+  if (!employee) {
+    res.status(404).json({ error: "Employee not found" });
+    return;
+  }
+  if (!employee.active) {
+    res.status(400).json({ error: "Cannot transfer inactive employee" });
+    return;
+  }
+
+  const dept = departments.find((d) => d.id == newDeptId);
+  if (!dept) {
+    res.status(404).json({ error: "Department not found" });
+    return;
+  }
+  if (dept.id === employee.departmentId) {
+    res.status(400).json({ error: "Employee already in that department" });
+    return;
+  }
+
+  employee.departmentId = dept.id;
+  res.json({ message: `Employee transferred to ${dept.name}` });
 }
 
-// --------------------------------------------------------------------------
-// SMELL 4: Magic numbers everywhere
-// Hardcoded numeric values with no explanation of what they represent.
-// --------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// SMELL 4 (fixed): Named constants replace all magic numbers above.
+// ----------------------------------------------------------------------------
 export function calculateBonus(req: Request, res: Response) {
-  var employeeId = req.body.employeeId;
-  var employee = null;
-  for (var i = 0; i < employees.length; i++) {
-    if (employees[i].id == employeeId) {
-      employee = employees[i];
-    }
-  }
-  if (employee == null) {
+  const { employeeId } = req.body;
+  const employee = employees.find((e) => e.id == employeeId);
+
+  if (!employee) {
     res.status(404).json({ error: "Employee not found" });
     return;
   }
 
-  var bonus = 0;
-  if (employee.yearsOfService > 10) {
-    bonus = employee.salary * 0.15;
-  } else if (employee.yearsOfService > 5) {
-    bonus = employee.salary * 0.10;
-  } else if (employee.yearsOfService > 2) {
-    bonus = employee.salary * 0.05;
-  } else {
-    bonus = employee.salary * 0.02;
+  const tenureTier =
+    TENURE_BONUS_RATES.find((t) => employee.yearsOfService > t.minYears) ??
+    TENURE_BONUS_RATES[TENURE_BONUS_RATES.length - 1];
+  let bonus = employee.salary * tenureTier.rate;
+
+  if (employee.rating >= RATING_EXCELLENT_THRESHOLD) {
+    bonus *= RATING_EXCELLENT_MULTIPLIER;
+  } else if (employee.rating >= RATING_GOOD_THRESHOLD) {
+    bonus *= RATING_GOOD_MULTIPLIER;
+  } else if (employee.rating < RATING_POOR_THRESHOLD) {
+    bonus *= RATING_POOR_MULTIPLIER;
   }
 
-  if (employee.rating >= 4.5) {
-    bonus = bonus * 1.5;
-  } else if (employee.rating >= 3.5) {
-    bonus = bonus * 1.2;
-  } else if (employee.rating < 2.0) {
-    bonus = bonus * 0.5;
-  }
-
-  if (employee.level == "director") {
-    bonus = bonus + 5000;
-  } else if (employee.level == "lead") {
-    bonus = bonus + 3000;
-  } else if (employee.level == "senior") {
-    bonus = bonus + 1500;
-  }
+  bonus += LEVEL_BONUS_STIPEND[employee.level] ?? 0;
 
   res.json({
     employeeId: employee.id,
-    name: employee.firstName + " " + employee.lastName,
-    bonus: Math.round(bonus * 100) / 100,
+    name: `${employee.firstName} ${employee.lastName}`,
+    bonus: round2(bonus),
   });
 }
 
-// --------------------------------------------------------------------------
-// SMELL 5: No types, no interfaces, callback-style everything
-// Everything is `any`, variable names are unclear, and the entire
-// data transformation pipeline is written imperatively with manual loops
-// instead of functional array methods.
-// --------------------------------------------------------------------------
-export function getDepartmentSummary(req: Request, res: Response) {
-  var d: any[] = [];
-  for (var i = 0; i < departments.length; i++) {
-    var x: any = {};
-    x.n = departments[i].name;
-    x.id = departments[i].id;
-    x.c = 0;
-    x.s = 0;
-    x.a = 0;
-    for (var j = 0; j < employees.length; j++) {
-      if (employees[j].departmentId == departments[i].id && employees[j].active == true) {
-        x.c = x.c + 1;
-        x.s = x.s + employees[j].salary;
-      }
-    }
-    if (x.c > 0) {
-      x.a = x.s / x.c;
-    }
-    x.a = Math.round(x.a * 100) / 100;
-    d.push(x);
-  }
-  res.json(d);
+// ----------------------------------------------------------------------------
+// SMELL 5 (fixed): Typed interface, descriptive names, functional array methods.
+// ----------------------------------------------------------------------------
+export function getDepartmentSummary(_req: Request, res: Response) {
+  const summaries: DepartmentSummary[] = departments.map((dept) => {
+    const activeEmployees = employees.filter(
+      (emp) => emp.departmentId === dept.id && emp.active
+    );
+    const totalSalary = activeEmployees.reduce((sum, emp) => sum + emp.salary, 0);
+    const averageSalary = activeEmployees.length > 0
+      ? round2(totalSalary / activeEmployees.length)
+      : 0;
+
+    return {
+      id: dept.id,
+      name: dept.name,
+      activeEmployeeCount: activeEmployees.length,
+      totalSalary,
+      averageSalary,
+    };
+  });
+
+  res.json(summaries);
 }
