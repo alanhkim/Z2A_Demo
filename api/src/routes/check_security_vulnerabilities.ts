@@ -1,140 +1,216 @@
 // ============================================================================
 // check_security_vulnerabilities.ts
-// This file contains intentional security vulnerabilities for demo purposes.
+// Security vulnerabilities have been remediated in this file.
 // ============================================================================
 import { Request, Response, NextFunction } from "express";
 import fs from "fs";
-import { exec } from "child_process";
+import path from "path";
+import crypto from "crypto";
+import { execFile } from "child_process";
 
 // --------------------------------------------------------------------------
-// VULNERABILITY 1: SQL Injection
-// User input is directly interpolated into a query string with no
-// parameterization or sanitization.
+// FIX 1: SQL Injection
+// Use parameterized queries instead of string interpolation so user input
+// is never treated as SQL syntax.
 // --------------------------------------------------------------------------
 export function searchProducts(req: Request, res: Response) {
-  var keyword = req.query.keyword;
-  var query = "SELECT * FROM products WHERE name LIKE '%" + keyword + "%'";
-  // db.execute(query) would run the unsanitized query
-  res.json({ query: query });
+  const keyword = req.query.keyword as string;
+  // Parameterized query: the placeholder $1 is bound separately by the driver,
+  // so user input can never alter the query structure.
+  const query = "SELECT * FROM products WHERE name LIKE $1";
+  const params = [`%${keyword}%`];
+  // db.execute(query, params) would safely execute the parameterized query
+  res.json({ query: query, params: params });
 }
 
 // --------------------------------------------------------------------------
-// VULNERABILITY 2: Cross-Site Scripting (XSS)
-// User-supplied HTML is rendered directly into the response without encoding.
+// FIX 2: Cross-Site Scripting (XSS)
+// HTML-encode user-supplied values before embedding them in HTML output.
 // --------------------------------------------------------------------------
+function escapeHtml(unsafe: string): string {
+  return unsafe
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#x27;");
+}
+
 export function renderGreeting(req: Request, res: Response) {
-  var username = req.query.name;
-  res.send("<html><body><h1>Welcome, " + username + "!</h1></body></html>");
+  const username = escapeHtml((req.query.name as string) ?? "");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(`<html><body><h1>Welcome, ${username}!</h1></body></html>`);
 }
 
 // --------------------------------------------------------------------------
-// VULNERABILITY 3: Command Injection
-// User input is passed directly into a shell command.
+// FIX 3: Command Injection
+// Validate the host against a strict allowlist pattern and use execFile
+// (which does not spawn a shell) so arguments cannot contain shell metacharacters.
 // --------------------------------------------------------------------------
+const SAFE_HOST_RE = /^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$/;
+
 export function pingHost(req: Request, res: Response) {
-  var host = req.query.host as string;
-  exec("ping -c 4 " + host, (error, stdout, stderr) => {
+  const host = req.query.host as string;
+  if (!host || !SAFE_HOST_RE.test(host)) {
+    res.status(400).json({ error: "Invalid host" });
+    return;
+  }
+  execFile("ping", ["-c", "4", host], { timeout: 10000 }, (error, stdout, stderr) => {
+    if (error) {
+      res.status(500).json({ error: "Ping failed" });
+      return;
+    }
     res.json({ output: stdout, error: stderr });
   });
 }
 
 // --------------------------------------------------------------------------
-// VULNERABILITY 4: Path Traversal
-// User-controlled file path with no validation allows reading arbitrary files
-// from the server filesystem.
+// FIX 4: Path Traversal
+// Resolve the absolute path and verify it stays inside the uploads directory.
 // --------------------------------------------------------------------------
+const UPLOADS_DIR = path.resolve("./uploads");
+
 export function getDocument(req: Request, res: Response) {
-  var filename = req.params.filename;
-  var filepath = "./uploads/" + filename;
-  var content = fs.readFileSync(filepath, "utf-8");
-  res.send(content);
-}
-
-// --------------------------------------------------------------------------
-// VULNERABILITY 5: Hardcoded Secrets
-// API keys and credentials are embedded directly in source code.
-// --------------------------------------------------------------------------
-var API_KEY = "sk-live-4f3c2b1a0987654321abcdef00000000";
-var DB_PASSWORD = "SuperSecret123!";
-var JWT_SECRET = "my-jwt-secret-key-do-not-share";
-
-export function getConfig(req: Request, res: Response) {
-  res.json({
-    apiKey: API_KEY,
-    dbPassword: DB_PASSWORD,
-    jwtSecret: JWT_SECRET,
-  });
-}
-
-// --------------------------------------------------------------------------
-// VULNERABILITY 6: Insecure Deserialization
-// Blindly parsing and evaluating user-supplied JSON without validation.
-// --------------------------------------------------------------------------
-export function importData(req: Request, res: Response) {
-  var rawData = req.body.data;
-  var parsed = eval("(" + rawData + ")");
-  res.json({ imported: parsed });
-}
-
-// --------------------------------------------------------------------------
-// VULNERABILITY 7: Missing Authentication & Authorization
-// Sensitive admin actions have no auth checks whatsoever.
-// --------------------------------------------------------------------------
-export function deleteAllUsers(req: Request, res: Response) {
-  // No authentication check — anyone can call this!
-  // db.execute("DELETE FROM users");
-  res.json({ message: "All users deleted" });
-}
-
-export function getAdminDashboard(req: Request, res: Response) {
-  // No role verification — any user can access admin data
-  res.json({
-    totalRevenue: 1250000,
-    userCredentials: [
-      { email: "admin@corp.com", password: "admin123" },
-      { email: "cfo@corp.com", password: "finance456" },
-    ],
-  });
-}
-
-// --------------------------------------------------------------------------
-// VULNERABILITY 8: Insecure HTTP Headers / CORS Misconfiguration
-// Wildcard CORS and missing security headers expose the application.
-// --------------------------------------------------------------------------
-export function insecureCorsMiddleware(req: Request, res: Response, next: NextFunction) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "*");
-  res.setHeader("Access-Control-Allow-Headers", "*");
-  // Missing: X-Content-Type-Options, X-Frame-Options, Content-Security-Policy,
-  //          Strict-Transport-Security, etc.
-  next();
-}
-
-// --------------------------------------------------------------------------
-// VULNERABILITY 9: Insufficient Logging & Error Leakage
-// Full stack traces and internal details are sent to the client.
-// --------------------------------------------------------------------------
-export function riskyOperation(req: Request, res: Response) {
+  const filename = req.params.filename;
+  const filepath = path.resolve(UPLOADS_DIR, filename);
+  // Ensure the resolved path starts inside the uploads directory.
+  if (!filepath.startsWith(UPLOADS_DIR + path.sep)) {
+    res.status(400).json({ error: "Invalid filename" });
+    return;
+  }
   try {
-    var data = JSON.parse(req.body.payload);
-    // ... process data ...
-    res.json({ success: true });
-  } catch (error: any) {
-    res.status(500).json({
-      error: error.message,
-      stack: error.stack,          // leaks internal paths and code structure
-      env: process.env,            // leaks all environment variables!
-    });
+    // Resolve symlinks so a symlink pointing outside the uploads dir is also rejected.
+    const realpath = fs.realpathSync(filepath);
+    if (!realpath.startsWith(UPLOADS_DIR + path.sep)) {
+      res.status(400).json({ error: "Invalid filename" });
+      return;
+    }
+    const content = fs.readFileSync(realpath, "utf-8");
+    res.send(content);
+  } catch {
+    res.status(404).json({ error: "File not found" });
   }
 }
 
 // --------------------------------------------------------------------------
-// VULNERABILITY 10: Denial of Service via Regex (ReDoS)
-// A catastrophic backtracking regex pattern on user input.
+// FIX 5: Hardcoded Secrets
+// Load secrets from environment variables; never embed them in source code.
+// --------------------------------------------------------------------------
+const API_KEY = process.env.API_KEY;
+const DB_PASSWORD = process.env.DB_PASSWORD;
+const JWT_SECRET = process.env.JWT_SECRET;
+
+export function getConfig(req: Request, res: Response) {
+  // Indicate which secrets are configured without revealing their values.
+  res.json({
+    apiKeyConfigured: !!API_KEY,
+    dbPasswordConfigured: !!DB_PASSWORD,
+    jwtSecretConfigured: !!JWT_SECRET,
+  });
+}
+
+// --------------------------------------------------------------------------
+// FIX 6: Insecure Deserialization
+// Use JSON.parse() instead of eval() so user input is never executed as code.
+// --------------------------------------------------------------------------
+export function importData(req: Request, res: Response) {
+  try {
+    const rawData = req.body.data as string;
+    const parsed = JSON.parse(rawData);
+    res.json({ imported: parsed });
+  } catch {
+    res.status(400).json({ error: "Invalid JSON data" });
+  }
+}
+
+// --------------------------------------------------------------------------
+// FIX 7: Missing Authentication & Authorization
+// Verify a bearer token before allowing access to sensitive admin actions.
+// --------------------------------------------------------------------------
+function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers["authorization"];
+  const expectedToken = process.env.ADMIN_API_TOKEN;
+  if (!expectedToken || !authHeader) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const provided = Buffer.from(authHeader);
+  const expected = Buffer.from(`Bearer ${expectedToken}`);
+  // Use constant-time comparison to prevent timing-based token enumeration.
+  if (
+    provided.length !== expected.length ||
+    !crypto.timingSafeEqual(provided, expected)
+  ) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  next();
+}
+
+export function deleteAllUsers(req: Request, res: Response) {
+  requireAdminAuth(req, res, () => {
+    // db.execute("DELETE FROM users");
+    res.json({ message: "All users deleted" });
+  });
+}
+
+export function getAdminDashboard(req: Request, res: Response) {
+  requireAdminAuth(req, res, () => {
+    res.json({ totalRevenue: 1250000 });
+  });
+}
+
+// --------------------------------------------------------------------------
+// FIX 8: Insecure HTTP Headers / CORS Misconfiguration
+// Restrict CORS to known origins and add essential security headers.
+// --------------------------------------------------------------------------
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "";
+
+export function secureCorsMiddleware(req: Request, res: Response, next: NextFunction) {
+  const origin = req.headers.origin ?? "";
+  if (ALLOWED_ORIGIN && origin === ALLOWED_ORIGIN) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Content-Security-Policy", "default-src 'self'");
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  next();
+}
+
+// --------------------------------------------------------------------------
+// FIX 9: Insufficient Logging & Error Leakage
+// Return a generic error message to the client; log details server-side only.
+// --------------------------------------------------------------------------
+export function riskyOperation(req: Request, res: Response) {
+  try {
+    // Parse the payload to validate it is well-formed JSON; processing happens downstream.
+    JSON.parse(req.body.payload);
+    res.json({ success: true });
+  } catch (error: any) {
+    // Log the full error server-side for diagnostics, never send it to the client.
+    console.error("riskyOperation error:", error);
+    res.status(500).json({ error: "An internal server error occurred" });
+  }
+}
+
+// --------------------------------------------------------------------------
+// FIX 10: Denial of Service via Regex (ReDoS)
+// Use a linear-time email validation approach without catastrophic backtracking.
 // --------------------------------------------------------------------------
 export function validateEmail(req: Request, res: Response) {
-  var email = req.body.email as string;
-  var emailRegex = /^([a-zA-Z0-9]+\.)*[a-zA-Z0-9]+@([a-zA-Z0-9]+\.)+[a-zA-Z]{2,}$/;
-  var isValid = emailRegex.test(email);
-  res.json({ email: email, valid: isValid });
+  const email = req.body.email as string;
+  // Simple, linear-time check: one @ with non-empty local and domain parts,
+  // domain must contain at least one dot.
+  const atIndex = typeof email === "string" ? email.indexOf("@") : -1;
+  let isValid = false;
+  if (atIndex > 0 && atIndex === email.lastIndexOf("@")) {
+    const local = email.slice(0, atIndex);
+    const domain = email.slice(atIndex + 1);
+    isValid = local.length > 0 && domain.includes(".") && domain.length > 2;
+  }
+  res.json({ valid: isValid });
 }
